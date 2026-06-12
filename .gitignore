@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+*.log
+venv/
+.venv/
+.DS_Store
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+lambda/package/
+lambda/*.zip
