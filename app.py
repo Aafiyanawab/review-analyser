@@ -38,6 +38,8 @@ EXCLUDE_PATTERNS = [
 
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10 MB
+
 CORS(app, supports_credentials=True)
 
 def comp():
@@ -129,6 +131,10 @@ def status():
         return jsonify({"ok": True, "session_id": get_session_id()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
 
 
 @app.route("/api/parse", methods=["POST"])
