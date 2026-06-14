@@ -430,16 +430,6 @@ function handleDrop(e){
   var f=e.dataTransfer.files[0];if(f)handleFile(f);
 }
 
-var REVIEW_COL_CANDIDATES=['review','reviews','review_text','review text','comment','comments','feedback','customer_review','customer review','opinion','text','description'];
-
-function detectReviewColumn(headers){
-  for(var i=0;i<headers.length;i++){
-    var h=headers[i].toLowerCase().trim();
-    if(REVIEW_COL_CANDIDATES.indexOf(h)!==-1) return headers[i];
-  }
-  return null;
-}
-
 function handleFile(file){
   if(!file)return;
   document.getElementById('fname').textContent=file.name+' (parsing...)';
@@ -447,21 +437,33 @@ function handleFile(file){
   document.getElementById('err-bx').classList.add('hidden');
   var fd=new FormData();fd.append('file',file);
   fetch('/api/parse',{method:'POST',body:fd,credentials:'include'})
-    .then(function(r){return r.json();})
-    .then(function(d){
-      if(d.error){showErr(d.error+(d.headers?(' Available columns: '+d.headers.join(', ')):''));document.getElementById('fname').textContent='';return;}
-      parsedRows=d.rows;
+    .then(function(r){return r.json().then(function(d){return {ok:r.ok,data:d};});})
+    .then(function(res){
+      var d=res.data;
+      if(d.error && !d.headers){showErr(d.error);document.getElementById('fname').textContent='';return;}
+
+      parsedRows=d.rows||[];
       document.getElementById('fname').textContent=file.name+' · '+d.count+' rows';
       var sel=document.getElementById('colsel');
-      sel.innerHTML=d.headers.map(function(h){return'<option value="'+h+'">'+h+'</option>';}).join('');
-      var detected=detectReviewColumn(d.headers);
+      var headers=d.headers||[];
+      var textCols=d.text_columns||[];
+
+      // Order: detected/text columns first, then everything else
+      var ordered=textCols.concat(headers.filter(function(h){return textCols.indexOf(h)===-1;}));
+      sel.innerHTML=ordered.map(function(h){
+        var label=h+(textCols.indexOf(h)!==-1?' (text)':'');
+        return'<option value="'+h+'">'+label+'</option>';
+      }).join('');
+
       var tag=document.getElementById('detect-tag');
-      if(detected){
-        sel.value=detected;
-        tag.innerHTML='<span class="auto-tag">Auto-detected</span>';
+      if(d.detected_column){
+        sel.value=d.detected_column;
+        tag.innerHTML='<span class="auto-tag">Auto-detected: '+d.detected_column+'</span>';
       }else{
-        tag.innerHTML='<span class="manual-tag">Select manually</span>';
+        tag.innerHTML='<span class="manual-tag">No column auto-detected — select manually</span>';
+        if(d.error) showErr(d.error);
       }
+
       document.getElementById('maxrows').max=d.count;
       document.getElementById('maxrows').value=Math.min(50,d.count);
       updateCost();
@@ -472,7 +474,7 @@ function handleFile(file){
 
 document.addEventListener('change',function(e){
   if(e.target&&e.target.id==='colsel'){
-    document.getElementById('detect-tag').innerHTML='<span class="manual-tag">Manually selected</span>';
+    document.getElementById('detect-tag').innerHTML='<span class="manual-tag">Manually selected: '+e.target.value+'</span>';
   }
 });
 
@@ -486,24 +488,41 @@ async function startAnalysis(){
   var max=parseInt(document.getElementById('maxrows').value)||50;
   var subset=parsedRows.slice(0,max);
   var bid=Math.random().toString(36).slice(2,10);
+
+  // ── Validation: does the selected column actually have review text? ──
+  var texts=subset.map(function(r){return (r[col]||'').trim();}).filter(function(t){return t.length>=3;});
+  if(!texts.length){
+    showErr('The selected column "'+col+'" has no usable text (all values empty or too short). '+
+            'Please choose a different column.');
+    return;
+  }
+
+  document.getElementById('err-bx').classList.add('hidden');
   document.getElementById('col-sec').classList.add('hidden');
   document.getElementById('proc-sec').classList.remove('hidden');
   document.getElementById('res-sec').classList.add('hidden');
   results=[];
   Object.values(charts).forEach(function(c){c.destroy();}); charts={};
-  for(var i=0;i<subset.length;i++){
-    var text=(subset[i][col]||'').trim();
-    if(!text||text.length<3)continue;
-    document.getElementById('prog').style.width=Math.round((i+1)/subset.length*100)+'%';
-    document.getElementById('proc-txt').textContent='Processing '+(i+1)+' / '+subset.length+' reviews...';
+
+  var CHUNK=25; // AWS Comprehend BatchDetect* limit
+  var chunks=[];
+  for(var i=0;i<texts.length;i+=CHUNK) chunks.push(texts.slice(i,i+CHUNK));
+
+  var done=0;
+  for(var c=0;c<chunks.length;c++){
+    document.getElementById('proc-txt').textContent='Processing batch '+(c+1)+' of '+chunks.length+' ('+chunks[c].length+' reviews)...';
     try{
-      var resp=await fetch('/api/analyse',{method:'POST',credentials:'include',
+      var resp=await fetch('/api/analyse-batch',{method:'POST',credentials:'include',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({text:text,batch_id:bid})});
+        body:JSON.stringify({texts:chunks[c],batch_id:bid})});
       var d=await resp.json();
-      if(d.sentiment)results.push(d);
+      if(d.error){ showErr(d.error); }
+      if(d.results) results=results.concat(d.results);
     }catch(e){console.warn(e);}
+    done+=chunks[c].length;
+    document.getElementById('prog').style.width=Math.round(done/texts.length*100)+'%';
   }
+
   document.getElementById('proc-sec').classList.add('hidden');
   document.getElementById('res-sec').classList.remove('hidden');
   document.getElementById('chip-last').textContent='Last analysis: just now';
@@ -624,17 +643,30 @@ function showTab(name,el){
   if(name==='history')loadHistory();
 }
 
-function resetToUpload(){
+async function resetToUpload(){
+  // Delete all DynamoDB records for this session before resetting
+  try{
+    await fetch('/api/clear-session',{method:'POST',credentials:'include'});
+  }catch(e){console.warn('clear-session failed',e);}
+
   showTab('analyse',null);
   document.getElementById('col-sec').classList.add('hidden');
   document.getElementById('proc-sec').classList.add('hidden');
   document.getElementById('res-sec').classList.add('hidden');
+  document.getElementById('err-bx').classList.add('hidden');
   document.getElementById('fi').value='';
   document.getElementById('fname').textContent='';
   document.getElementById('abtn').disabled=true;
-  parsedRows=[];results=[];flt='All';
+  parsedRows=[];results=[];flt='All';histItems=[];
   Object.values(charts).forEach(function(c){c.destroy();}); charts={};
+  toast('Started new session — previous data cleared');
 }
+
+// ── Cleanup on tab/window close ──
+// sendBeacon fires a POST even as the page is unloading (fetch would be cancelled)
+window.addEventListener('beforeunload', function(){
+  navigator.sendBeacon('/api/clear-session');
+});
 
 async function loadHistory(){
   document.getElementById('hist-body').innerHTML='<div class="empty">Loading from DynamoDB...</div>';

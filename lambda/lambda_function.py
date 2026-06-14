@@ -56,11 +56,34 @@ def analyse_review(text, session_id, batch_id):
     table.put_item(Item=record)
     return record
 
-def find_review_column(headers):
-    candidates = ['review','text','comment','feedback','description','review_text','review_body','content']
+REVIEW_CANDIDATES = ['review','reviews','review_text','review text','comment','comments',
+                     'feedback','customer_feedback','customer_review','customer review',
+                     'opinion','description','text','content']
+EXCLUDE_PATTERNS = ['id','sku','product','category','rating','score','price','date',
+                     'qty','quantity','stock','code','status','name','type','brand']
+
+def find_review_column(headers, rows=None):
+    # Step 1 — exact known names (case-insensitive)
     for h in headers:
-        if h.lower().strip() in candidates:
+        if h.lower().strip() in REVIEW_CANDIDATES:
             return h
+    # Step 2 — heuristic: longest average text column, excluding ID/SKU/product/rating/date-like headers
+    if rows:
+        candidates = []
+        for h in headers:
+            hl = h.lower().strip()
+            if any(p in hl for p in EXCLUDE_PATTERNS):
+                continue
+            sample = [str(r.get(h, '') or '').strip() for r in rows[:10]]
+            non_empty = [s for s in sample if s]
+            if not non_empty:
+                continue
+            avg_len = sum(len(s) for s in non_empty) / len(non_empty)
+            if avg_len >= 15:
+                candidates.append((h, avg_len))
+        if candidates:
+            candidates.sort(key=lambda x: -x[1])
+            return candidates[0][0]
     return headers[0] if headers else None
 
 def lambda_handler(event, context):
@@ -89,7 +112,7 @@ def lambda_handler(event, context):
                     rows     = [{headers[i]:(str(r[i]) if r[i] else '') for i in range(len(headers))} for r in all_rows[1:]]
                 else:
                     continue
-                col = find_review_column(headers)
+                col = find_review_column(headers, rows)
                 if not col: continue
                 for row in rows:
                     try:
