@@ -80,21 +80,7 @@ review-analyser/
 │
 └── README.md
 ```
-## 📸 Screenshots
 
-### Upload Reviews
-
-![Upload Screen](screenshots/upload.png)
-
-### Dashboard Analytics
-
-![Dashboard](screenshots/dashboard.png)
-
-### Analysis Results
-
-![Results](screenshots/results.png)
-
----
 
 ## ☁️ AWS Services Used
 
@@ -164,7 +150,6 @@ docker ps
 ---
 
 
----
 
 ## 🔮 Future Improvements
 
